@@ -5,8 +5,8 @@ from torch.nn import functional as F
 # hyperparameters
 batch_size = 32 # how many independent sequences will we process in parallel?
 block_size = 8 # what is the maximum context length for predictions?
-max_iters = 3000
-eval_interval = 300
+max_iters = 5000
+eval_interval = 500
 learning_rate = 1e-3
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
@@ -77,12 +77,28 @@ class Head(nn.Module):
         wei = wei.masked_fill(self.tril[:T,:T] == 0, float('-inf'))
         wei = F.softmax(wei, dim=-1)
         # wei = self.dropout(wei)
-
         v = self.value(x) # (B,T,C) @ (C,head_size) ---> (B,T,head_size)
         out = wei @ v # (B,T,T) @ (B,T,head_size) ---> (B,T,head_size)
-
         return out
 
+class MultiHeadAttention(nn.Module):
+    def __init__(self, num_heads, head_size):
+        super().__init__()
+        self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+
+    def forward(self, x):
+        return torch.cat([h(x) for h in self.heads], dim=-1) # (B,T,C) -> (B,T,num_heads*head_size)
+
+class FeedFoward(nn.Module):
+    def __init__(self, n_embd):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_embd, n_embd),
+            nn.ReLU(),
+            )
+
+    def forward(self, x):
+        return self.net(x) # (B,T,C) -> (B,T,C)
 # super simple bigram model
 class BigramLanguageModel(nn.Module):
 
@@ -91,7 +107,8 @@ class BigramLanguageModel(nn.Module):
         # each token directly reads off the logits for the next token from a lookup table
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
         self.position_embedding_table = nn.Embedding(block_size, n_embd)
-        self.sa_head = Head(n_embd)  # single head attention
+        self.sa_head = MultiHeadAttention(4, n_embd // 4)  # single head attention
+        self.ffwd = FeedFoward(n_embd)
         self.lm_head = nn.Linear(n_embd, vocab_size)
 
     def forward(self, idx, targets=None):
@@ -101,6 +118,7 @@ class BigramLanguageModel(nn.Module):
         pos_emb = self.position_embedding_table(torch.arange(T, device=device)) # (T,C)
         x = tok_emb + pos_emb # (B,T,C)
         x = self.sa_head(x)
+        x = self.ffwd(x)
         logits = self.lm_head(x)
 
         if targets is None:
